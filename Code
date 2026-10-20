@@ -1,1 +1,620 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+#include <DHT.h>
 
+// ============================================================
+// PLANTPAL
+// Arduino UNO + SH1106 OLED + DHT11 + Capacitive Soil Sensor
+// ============================================================
+// IMPORTANT:
+// OLED = SH1106 128x64 I2C
+// U8g2 PAGE BUFFER is used to prevent Arduino UNO SRAM problems.
+// ============================================================
+
+
+// ============================================================
+// 1. OLED
+// ============================================================
+
+// PAGE BUFFER MODE (_1_) = very low RAM usage
+U8G2_SH1106_128X64_NONAME_1_HW_I2C
+u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+
+// ============================================================
+// 2. DHT11
+// ============================================================
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+
+// ============================================================
+// 3. SOIL MOISTURE SENSOR
+// ============================================================
+
+#define SOIL_PIN A0
+
+
+// ============================================================
+// 4. CALIBRATION
+// ============================================================
+//
+// CHANGE THESE TWO VALUES after checking Serial Monitor.
+//
+// DRY_VALUE = raw sensor reading in dry soil / air
+// WET_VALUE = raw sensor reading in very wet soil
+//
+// Your sensor should normally behave like:
+//
+// DRY SOIL  -> HIGHER ADC
+// WET SOIL  -> LOWER ADC
+//
+// Example:
+// DRY_VALUE = 850
+// WET_VALUE = 350
+//
+// DO NOT blindly use these example values.
+// Measure YOUR sensor first.
+//
+
+int DRY_VALUE = 500;
+int WET_VALUE = 100;
+
+
+// ============================================================
+// 5. PLANT THRESHOLDS
+// ============================================================
+
+#define VERY_DRY_PERCENT 20
+#define DRY_PERCENT       40
+#define VERY_WET_PERCENT   85
+
+float HOT_TEMP = 32.0;
+
+
+// ============================================================
+// 6. PLANT STATES
+// ============================================================
+
+enum PlantState
+{
+  HAPPY,
+  THIRSTY,
+  VERY_THIRSTY,
+  OVERWATERED,
+  HOT
+};
+
+PlantState plantState;
+
+
+// ============================================================
+// 7. DISPLAY GEOMETRY
+// ============================================================
+
+const int LEFT_EYE_X  = 38;
+const int RIGHT_EYE_X = 90;
+
+const int EYE_Y = 25;
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+  Serial.begin(9600);
+
+  dht.begin();
+
+  u8g2.begin();
+
+  // Startup screen
+  u8g2.firstPage();
+
+  do
+  {
+    u8g2.setFont(u8g2_font_6x10_tf);
+
+    u8g2.drawStr(31, 25, "PLANTPAL");
+    u8g2.drawStr(20, 43, "Starting...");
+
+  } while (u8g2.nextPage());
+
+  delay(2000);
+
+
+  // Serial Monitor header
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("          PLANTPAL SENSOR TEST");
+  Serial.println("========================================");
+
+  Serial.println("Arduino UNO + SH1106 + DHT11");
+  Serial.println("Soil sensor connected to A0");
+  Serial.println();
+
+  Serial.println("CURRENT CALIBRATION:");
+  Serial.print("DRY_VALUE = ");
+  Serial.println(DRY_VALUE);
+
+  Serial.print("WET_VALUE = ");
+  Serial.println(WET_VALUE);
+
+  Serial.println();
+  Serial.println("CALIBRATION GUIDE:");
+  Serial.println("1. Put sensor in DRY soil / air.");
+  Serial.println("2. Note the Soil Raw value.");
+  Serial.println("3. Put sensor in VERY WET soil.");
+  Serial.println("4. Note the Soil Raw value.");
+  Serial.println("5. Set DRY_VALUE and WET_VALUE in code.");
+  Serial.println("========================================");
+  Serial.println();
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop()
+{
+  // ----------------------------------------------------------
+  // READ SOIL SENSOR
+  // ----------------------------------------------------------
+
+  int soilRaw = analogRead(SOIL_PIN);
+
+
+  // ----------------------------------------------------------
+  // READ DHT11
+  // ----------------------------------------------------------
+
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+
+  // ----------------------------------------------------------
+  // DHT ERROR CHECK
+  // ----------------------------------------------------------
+
+  if (isnan(temperature) || isnan(humidity))
+  {
+    Serial.println("ERROR: DHT11 reading failed.");
+    Serial.println("Check DHT11 wiring.");
+
+    drawDHTError();
+
+    delay(2000);
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // CALCULATE MOISTURE %
+  // ----------------------------------------------------------
+
+  int moisturePercent = map(
+    soilRaw,
+    DRY_VALUE,
+    WET_VALUE,
+    0,
+    100
+  );
+
+  moisturePercent = constrain(
+    moisturePercent,
+    0,
+    100
+  );
+
+
+  // ----------------------------------------------------------
+  // DETERMINE PLANT STATE
+  // ----------------------------------------------------------
+  //
+  // Priority:
+  //
+  // 1. TOO HOT
+  // 2. OVERWATERED
+  // 3. VERY THIRSTY
+  // 4. THIRSTY
+  // 5. HAPPY
+  //
+
+  if (temperature >= HOT_TEMP)
+  {
+    plantState = HOT;
+  }
+
+  else if (moisturePercent >= VERY_WET_PERCENT)
+  {
+    plantState = OVERWATERED;
+  }
+
+  else if (moisturePercent <= VERY_DRY_PERCENT)
+  {
+    plantState = VERY_THIRSTY;
+  }
+
+  else if (moisturePercent <= DRY_PERCENT)
+  {
+    plantState = THIRSTY;
+  }
+
+  else
+  {
+    plantState = HAPPY;
+  }
+
+
+  // ----------------------------------------------------------
+  // SERIAL MONITOR
+  // ----------------------------------------------------------
+
+  printSensorData(
+    soilRaw,
+    moisturePercent,
+    temperature,
+    humidity
+  );
+
+
+  // ----------------------------------------------------------
+  // OLED
+  // ----------------------------------------------------------
+
+  drawPlantFace();
+
+
+  // ----------------------------------------------------------
+  // UPDATE INTERVAL
+  // ----------------------------------------------------------
+
+  delay(2000);
+}
+
+
+// ============================================================
+// SERIAL MONITOR DATA
+// ============================================================
+
+void printSensorData(
+  int soilRaw,
+  int moisturePercent,
+  float temperature,
+  float humidity
+)
+{
+  Serial.println();
+  Serial.println("----------------------------------------");
+
+  // Soil sensor
+  Serial.print("Soil Raw ADC       : ");
+  Serial.println(soilRaw);
+
+  // Calibration values
+  Serial.print("Dry Calibration    : ");
+  Serial.println(DRY_VALUE);
+
+  Serial.print("Wet Calibration    : ");
+  Serial.println(WET_VALUE);
+
+  // Moisture percentage
+  Serial.print("Moisture           : ");
+  Serial.print(moisturePercent);
+  Serial.println(" %");
+
+  // Temperature
+  Serial.print("Temperature        : ");
+  Serial.print(temperature, 1);
+  Serial.println(" C");
+
+  // Humidity
+  Serial.print("Humidity           : ");
+  Serial.print(humidity, 1);
+  Serial.println(" %");
+
+
+  // Plant state
+  Serial.print("Plant State        : ");
+
+  switch (plantState)
+  {
+    case HAPPY:
+      Serial.println("HAPPY");
+      break;
+
+    case THIRSTY:
+      Serial.println("THIRSTY");
+      break;
+
+    case VERY_THIRSTY:
+      Serial.println("VERY THIRSTY");
+      break;
+
+    case OVERWATERED:
+      Serial.println("OVERWATERED");
+      break;
+
+    case HOT:
+      Serial.println("TOO HOT");
+      break;
+  }
+
+
+  // Calibration hint
+  Serial.println("----------------------------------------");
+}
+
+
+// ============================================================
+// OLED MAIN DISPLAY
+// ============================================================
+
+void drawPlantFace()
+{
+  u8g2.firstPage();
+
+  do
+  {
+    switch (plantState)
+    {
+      case HAPPY:
+        drawHappyFace();
+        break;
+
+      case THIRSTY:
+        drawThirstyFace();
+        break;
+
+      case VERY_THIRSTY:
+        drawVeryThirstyFace();
+        break;
+
+      case OVERWATERED:
+        drawOverwateredFace();
+        break;
+
+      case HOT:
+        drawHotFace();
+        break;
+    }
+
+  } while (u8g2.nextPage());
+}
+
+
+// ============================================================
+// HAPPY
+// ============================================================
+
+void drawHappyFace()
+{
+  // Happy eyebrows
+  u8g2.drawLine(32, 17, 44, 14);
+  u8g2.drawLine(84, 14, 96, 17);
+
+
+  // Eyes
+  u8g2.drawCircle(
+    LEFT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+  u8g2.drawCircle(
+    RIGHT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+
+  // Smile
+  u8g2.drawLine(50, 45, 54, 49);
+  u8g2.drawLine(54, 49, 59, 51);
+  u8g2.drawLine(59, 51, 64, 52);
+  u8g2.drawLine(64, 52, 69, 51);
+  u8g2.drawLine(69, 51, 74, 49);
+  u8g2.drawLine(74, 49, 78, 45);
+
+
+  // Label
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.drawStr(45, 63, "HAPPY");
+}
+
+
+// ============================================================
+// THIRSTY
+// ============================================================
+
+void drawThirstyFace()
+{
+  // Worried eyebrows
+  u8g2.drawLine(32, 17, 44, 14);
+  u8g2.drawLine(84, 14, 96, 17);
+
+
+  // Eyes
+  u8g2.drawCircle(
+    LEFT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+  u8g2.drawCircle(
+    RIGHT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+
+  // Sad mouth
+  u8g2.drawLine(52, 50, 57, 47);
+  u8g2.drawLine(57, 47, 64, 46);
+  u8g2.drawLine(64, 46, 71, 47);
+  u8g2.drawLine(71, 47, 76, 50);
+
+
+  // Label
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.drawStr(40, 63, "THIRSTY");
+}
+
+
+// ============================================================
+// VERY THIRSTY
+// ============================================================
+
+void drawVeryThirstyFace()
+{
+  // Worried eyebrows
+  u8g2.drawLine(31, 15, 45, 19);
+  u8g2.drawLine(83, 19, 97, 15);
+
+
+  // Eyes
+  u8g2.drawCircle(
+    LEFT_EYE_X,
+    EYE_Y + 1,
+    5
+  );
+
+  u8g2.drawCircle(
+    RIGHT_EYE_X,
+    EYE_Y + 1,
+    5
+  );
+
+
+  // Tears
+  u8g2.drawLine(38, 31, 38, 36);
+  u8g2.drawLine(90, 31, 90, 36);
+
+
+  // Open mouth
+  u8g2.drawCircle(
+    64,
+    49,
+    6
+  );
+
+
+  // Label
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.drawStr(25, 63, "VERY THIRSTY");
+}
+
+
+// ============================================================
+// OVERWATERED
+// ============================================================
+
+void drawOverwateredFace()
+{
+  // Drooping eyebrows
+  u8g2.drawLine(32, 18, 45, 21);
+  u8g2.drawLine(83, 21, 96, 18);
+
+
+  // Closed tired eyes
+  u8g2.drawLine(32, 27, 38, 31);
+  u8g2.drawLine(38, 31, 44, 27);
+
+  u8g2.drawLine(84, 27, 90, 31);
+  u8g2.drawLine(90, 31, 96, 27);
+
+
+  // Sad mouth
+  u8g2.drawLine(51, 48, 56, 45);
+  u8g2.drawLine(56, 45, 64, 44);
+  u8g2.drawLine(64, 44, 72, 45);
+  u8g2.drawLine(72, 45, 77, 48);
+
+
+  // Label
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.drawStr(30, 63, "OVERWATERED");
+}
+
+
+// ============================================================
+// TOO HOT
+// ============================================================
+
+void drawHotFace()
+{
+  // Angry / uncomfortable eyebrows
+  u8g2.drawLine(31, 18, 45, 14);
+  u8g2.drawLine(83, 14, 97, 18);
+
+
+  // Eyes
+  u8g2.drawCircle(
+    LEFT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+  u8g2.drawCircle(
+    RIGHT_EYE_X,
+    EYE_Y,
+    5
+  );
+
+
+  // Open mouth
+  u8g2.drawCircle(
+    64,
+    49,
+    7
+  );
+
+
+  // Tongue
+  u8g2.drawLine(
+    60,
+    53,
+    68,
+    53
+  );
+
+
+  // Label
+  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.drawStr(43, 63, "TOO HOT");
+}
+
+
+// ============================================================
+// DHT ERROR SCREEN
+// ============================================================
+
+void drawDHTError()
+{
+  u8g2.firstPage();
+
+  do
+  {
+    u8g2.setFont(u8g2_font_6x10_tf);
+
+    u8g2.drawStr(
+      22,
+      25,
+      "DHT11 ERROR"
+    );
+
+    u8g2.drawStr(
+      8,
+      43,
+      "Check connection"
+    );
+
+  } while (u8g2.nextPage());
+}
